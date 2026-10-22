@@ -162,7 +162,7 @@ See `agents/portfolio-manager.md` § "Two Books, Two Mindsets" for the full rule
 | crypto-futures | 10 | CCXT futures (funding rates, OI, long/short, liquidations) |
 | crypto-advanced-indicators | 8 | CCXT (OBV, MFI, ADX, Ichimoku, VWAP, Pivot Points) |
 | crypto-market-microstructure | 6 | CCXT (orderbook depth, imbalance, spoofing, market impact) |
-| crypto-learning-db | 18 | SQLite (trades, predictions, patterns, summaries, track records, trade modifications) |
+| crypto-learning-db | 19 | SQLite (trades with net-of-cost PnL, predictions, patterns, summaries, track records, trade modifications) |
 | crypto-polymarket | 6 | Polymarket Gamma API (prediction market probabilities — wisdom of crowds priced in real capital) |
 | crypto-defillama | 7 | DefiLlama API (TVL by chain/protocol, stablecoin supply, DEX volume, on-chain capital flows) |
 

@@ -75,7 +75,7 @@ case "$WORKFLOW" in
 1. Call get_portfolio_state() from crypto-learning-db to check open trades.
 2. If there are open trades, delegate to market-monitor agent to get current prices for each symbol using crypto-exchange MCP.
 3. Compare prices against each trade's stop_loss and take_profit. For longs: SL hit if price <= stop_loss, TP hit if price >= take_profit. For shorts: opposite.
-4. If any SL or TP was hit, delegate to portfolio-manager agent to close those trades using close_trade() from crypto-learning-db.
+4. If any SL or TP was hit, delegate to portfolio-manager agent to close those trades using close_trade() from crypto-learning-db (for futures, pass funding_rate_sum from get_funding_rate_history).
 5. For profitable trades NOT closed, delegate to risk-specialist agent to evaluate trailing stop adjustment using update_trade().
 6. For any trades closed, delegate to learning-agent to run post-mortem: query_predictions for the trade, validate each prediction with NL evaluation, upsert_pattern if a setup is identified.
 7. Delegate to learning-agent to call find_expired_predictions() with current prices and validate any expired predictions.

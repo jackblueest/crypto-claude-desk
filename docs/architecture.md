@@ -367,7 +367,7 @@ The system implements a continuous learning loop that improves with every trade.
 
 ### Storage: SQLite Database (`data/db/learning.db`)
 
-All learning data lives in SQLite, accessed via the `crypto-learning-db` MCP server (18 tools).
+All learning data lives in SQLite, accessed via the `crypto-learning-db` MCP server (19 tools).
 
 | Table | Purpose |
 |---|---|

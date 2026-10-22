@@ -15,7 +15,7 @@ Delegate using the Task tool with `subagent_type: general-purpose` and `model: o
 
 "You are the portfolio-manager agent. Read agents/portfolio-manager.md for your decision framework.
 Close trade $ARGUMENTS. If a price is specified after 'at', use that as exit price. Otherwise, get the current market price using get_exchange_prices() from crypto-exchange MCP.
-Call close_trade(trade_id='...', exit_price=..., close_reason='...') from crypto-learning-db MCP. PnL, portfolio balance, and stats are updated automatically.
+For futures trades, first call get_funding_rate_history(symbol=..., hours=<hours the trade was open, max 720>) from crypto-futures MCP and pass funding_rate_sum = average_rate * total_fundings. Call close_trade(trade_id='...', exit_price=..., close_reason='...', funding_rate_sum=...) from crypto-learning-db MCP. PnL is recorded net of fees, slippage, and funding; portfolio balance and stats are updated automatically.
 Do NOT use the Edit tool."
 
 ### Step 2: Post-Mortem Analysis
@@ -40,7 +40,7 @@ Do NOT use the Edit tool."
 
 ### Step 4: Present Results
 Show:
-1. Trade closure summary (entry, exit, PnL)
+1. Trade closure summary (entry, exit, gross PnL, fees, slippage, funding, net PnL)
 2. Post-mortem analysis
 3. Prediction accuracy (how many correct vs incorrect, with evaluations)
 4. Pattern identified (win rate, recommendation)

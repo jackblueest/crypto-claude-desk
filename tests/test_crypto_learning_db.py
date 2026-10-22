@@ -123,9 +123,13 @@ class TestTrades(TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["result"], "win")
         self.assertGreater(result["pnl_usd"], 0)
-        # PnL = 1000 * (((100000 - 97000) / 97000) * 100 * 3) / 100
-        expected_pnl = 1000 * (((100000 - 97000) / 97000) * 100 * 3) / 100
-        self.assertAlmostEqual(result["pnl_usd"], round(expected_pnl, 2), places=1)
+        # Gross = 1000 * (((100000 - 97000) / 97000) * 100 * 3) / 100
+        expected_gross = 1000 * (((100000 - 97000) / 97000) * 100 * 3) / 100
+        self.assertAlmostEqual(result["gross_pnl_usd"], round(expected_gross, 2), places=1)
+        # Net = gross - default futures fees (0.05%/side) - slippage (2 bps/side)
+        turnover = 3000 + 3000 * 100000 / 97000
+        expected_net = expected_gross - turnover * 0.0005 - turnover * 0.0002
+        self.assertAlmostEqual(result["pnl_usd"], round(expected_net, 2), places=1)
 
     def test_close_trade_long_loss(self):
         db._record_trade(
@@ -164,6 +168,151 @@ class TestTrades(TestCase):
     def test_close_nonexistent_trade(self):
         result = db._close_trade("trade_999", exit_price=100000)
         self.assertEqual(result["status"], "error")
+
+
+class TestTradingCosts(TestCase):
+    """Test fees, slippage, and funding in close_trade."""
+
+    def setUp(self):
+        if db.DB_PATH.exists():
+            db.DB_PATH.unlink()
+
+    def _open(self, side="long", portfolio_type="futures", leverage=5):
+        db._record_trade(
+            trade_id="trade_001", symbol="BTC/USDT", side=side,
+            portfolio_type=portfolio_type, entry_price=100000, usd_amount=1000,
+            leverage=leverage,
+        )
+
+    def test_default_futures_costs(self):
+        self._open()
+        result = db._close_trade("trade_001", exit_price=101000)
+        # Notional 5000 at entry, 5050 at exit -> turnover 10050
+        self.assertAlmostEqual(result["gross_pnl_usd"], 50.0)
+        self.assertAlmostEqual(result["fees_usd"], 5.03, places=2)
+        self.assertAlmostEqual(result["slippage_usd"], 2.01, places=2)
+        self.assertAlmostEqual(result["funding_usd"], 0.0)
+        self.assertAlmostEqual(result["pnl_usd"], 42.97, places=2)
+        self.assertAlmostEqual(result["pnl_percent"], 4.2965, places=3)
+
+    def test_default_spot_fee_rate(self):
+        self._open(portfolio_type="spot", leverage=1)
+        result = db._close_trade("trade_001", exit_price=100000)
+        self.assertEqual(result["fee_rate"], 0.001)
+        self.assertAlmostEqual(result["fees_usd"], 2.0)
+
+    def test_costs_turn_small_gross_win_into_loss(self):
+        self._open()
+        result = db._close_trade("trade_001", exit_price=100050)
+        self.assertGreater(result["gross_pnl_usd"], 0)
+        self.assertLess(result["pnl_usd"], 0)
+        self.assertEqual(result["result"], "loss")
+        state = db._get_portfolio_state()["portfolio"]
+        self.assertEqual(state["losses"], 1)
+        self.assertAlmostEqual(state["futures_balance"], 10000 + result["pnl_usd"], places=2)
+
+    def test_cost_overrides(self):
+        self._open()
+        result = db._close_trade("trade_001", exit_price=101000,
+                                 fee_rate=0, slippage_bps=0)
+        self.assertAlmostEqual(result["pnl_usd"], result["gross_pnl_usd"])
+
+    def test_negative_cost_inputs_rejected(self):
+        self._open()
+        result = db._close_trade("trade_001", exit_price=101000, fee_rate=-0.001)
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(db._get_portfolio_state()["open_trades_count"], 1)
+
+    def test_funding_paid_by_long(self):
+        self._open(side="long")
+        result = db._close_trade("trade_001", exit_price=100000,
+                                 fee_rate=0, slippage_bps=0,
+                                 funding_rate_sum=0.0003)
+        # 5000 notional * 0.03% = 1.50 paid
+        self.assertAlmostEqual(result["funding_usd"], 1.5)
+        self.assertAlmostEqual(result["pnl_usd"], -1.5)
+
+    def test_funding_received_by_short(self):
+        self._open(side="short")
+        result = db._close_trade("trade_001", exit_price=100000,
+                                 fee_rate=0, slippage_bps=0,
+                                 funding_rate_sum=0.0003)
+        self.assertAlmostEqual(result["funding_usd"], -1.5)
+        self.assertAlmostEqual(result["pnl_usd"], 1.5)
+
+    def test_funding_rejected_for_spot(self):
+        self._open(portfolio_type="spot", leverage=1)
+        result = db._close_trade("trade_001", exit_price=100000,
+                                 funding_rate_sum=0.0003)
+        self.assertEqual(result["status"], "error")
+
+    def test_costs_stored_on_trade(self):
+        self._open()
+        db._close_trade("trade_001", exit_price=101000, funding_rate_sum=0.0001)
+        trade = db._query_trades(status="closed")["trades"][0]
+        self.assertAlmostEqual(trade["gross_pnl_usd"], 50.0)
+        self.assertAlmostEqual(trade["fees_usd"], 5.03, places=2)
+        self.assertAlmostEqual(trade["slippage_usd"], 2.01, places=2)
+        self.assertAlmostEqual(trade["funding_usd"], 0.5)
+
+    def test_trade_stats_include_costs(self):
+        self._open()
+        db._close_trade("trade_001", exit_price=101000)
+        stats = db._get_trade_stats()["stats"]
+        self.assertAlmostEqual(stats["total_fees"], 5.03, places=2)
+        self.assertAlmostEqual(stats["total_slippage"], 2.01, places=2)
+        self.assertAlmostEqual(stats["total_funding"], 0.0)
+
+    def test_estimate_historical_costs_is_read_only(self):
+        # Simulate a trade closed before costs were tracked.
+        self._open()
+        conn = db._init_db()
+        conn.execute(
+            """UPDATE trades SET status='closed', exit_price=100050,
+               pnl_usd=2.5, pnl_percent=0.25, result='win',
+               closed_at='2026-01-01T00:00:00+00:00' WHERE id='trade_001'"""
+        )
+        conn.commit()
+        conn.close()
+        before = db._get_portfolio_state()["portfolio"]
+        report = db._estimate_historical_costs()
+        self.assertEqual(report["trades_without_costs"], 1)
+        self.assertEqual(report["recorded_win_rate"], 1)
+        self.assertEqual(report["estimated_net_win_rate"], 0)
+        self.assertLess(report["estimated_net_pnl_usd"], 0)
+        self.assertEqual(report["trades"][0]["estimated_result"], "loss")
+        self.assertEqual(db._get_portfolio_state()["portfolio"], before)
+        trade = db._query_trades(status="closed")["trades"][0]
+        self.assertIsNone(trade["fees_usd"])
+
+    def test_estimate_skips_trades_with_costs(self):
+        self._open()
+        db._close_trade("trade_001", exit_price=101000)
+        report = db._estimate_historical_costs()
+        self.assertEqual(report["trades_without_costs"], 0)
+
+    def test_migration_adds_cost_columns(self):
+        conn = sqlite3.connect(str(db.DB_PATH))
+        conn.execute(
+            """CREATE TABLE trades (
+                id TEXT PRIMARY KEY, symbol TEXT NOT NULL, side TEXT NOT NULL,
+                portfolio_type TEXT NOT NULL, entry_price REAL NOT NULL,
+                exit_price REAL, usd_amount REAL NOT NULL,
+                leverage REAL NOT NULL DEFAULT 1, stop_loss REAL,
+                take_profit REAL, strategy_type TEXT, opened_at TEXT NOT NULL,
+                closed_at TEXT, close_reason TEXT, pnl_usd REAL,
+                pnl_percent REAL, result TEXT, status TEXT NOT NULL DEFAULT 'open',
+                reasoning TEXT, key_assumptions TEXT, agent_signals TEXT,
+                learning TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )"""
+        )
+        conn.commit()
+        conn.close()
+        conn = db._init_db()
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(trades)")}
+        conn.close()
+        for col in ("gross_pnl_usd", "fees_usd", "slippage_usd", "funding_usd"):
+            self.assertIn(col, cols)
 
     def test_query_trades_all(self):
         db._record_trade(

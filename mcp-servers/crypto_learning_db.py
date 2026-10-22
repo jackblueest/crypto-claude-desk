@@ -67,6 +67,13 @@ def _discover_db_dir() -> Path:
 DB_DIR = _discover_db_dir()
 DB_PATH = DB_DIR / "learning.db"
 
+# Default trading costs applied by close_trade(). Fee rates are per side, as a
+# fraction of notional, and match Binance base-tier taker fees (USDT-M
+# perpetuals 0.05%, spot 0.10%). Slippage is per side, in basis points of
+# notional. Callers can override both per trade.
+DEFAULT_FEE_RATES = {"spot": 0.001, "futures": 0.0005}
+DEFAULT_SLIPPAGE_BPS = 2.0
+
 mcp = FastMCP("crypto-learning-db")
 
 # ---------------------------------------------------------------------------
@@ -104,8 +111,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         opened_at       TEXT NOT NULL,
         closed_at       TEXT,
         close_reason    TEXT,
-        pnl_usd         REAL,
-        pnl_percent     REAL,
+        pnl_usd         REAL,  -- net of fees, slippage, and funding
+        pnl_percent     REAL,  -- net, as a percent of usd_amount (margin)
+        gross_pnl_usd   REAL,  -- price move only, before costs
+        fees_usd        REAL,
+        slippage_usd    REAL,
+        funding_usd     REAL,  -- positive = paid, negative = received
         result          TEXT CHECK(result IN ('win','loss',NULL)),
         status          TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','closed')),
         reasoning       TEXT,
@@ -197,6 +208,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     # Schema migrations for existing databases.
     for migration in (
         "ALTER TABLE predictions ADD COLUMN evaluation TEXT",
+        "ALTER TABLE trades ADD COLUMN gross_pnl_usd REAL",
+        "ALTER TABLE trades ADD COLUMN fees_usd REAL",
+        "ALTER TABLE trades ADD COLUMN slippage_usd REAL",
+        "ALTER TABLE trades ADD COLUMN funding_usd REAL",
         "DROP TABLE IF EXISTS scorecard_history",
         "DROP TABLE IF EXISTS agent_scorecards",
     ):
@@ -279,10 +294,44 @@ def _record_trade(
         conn.close()
 
 
+def _trading_costs(
+    portfolio_type: str,
+    usd_amount: float,
+    leverage: float,
+    entry_price: float,
+    exit_price: float,
+    fee_rate: float | None = None,
+    slippage_bps: float | None = None,
+) -> dict:
+    """Estimate round-trip fees and slippage for a trade.
+
+    ``usd_amount`` is the margin committed, so notional is
+    ``usd_amount * leverage`` at entry and scales with price at exit.
+    """
+    if fee_rate is None:
+        fee_rate = DEFAULT_FEE_RATES[portfolio_type]
+    if slippage_bps is None:
+        slippage_bps = DEFAULT_SLIPPAGE_BPS
+    if fee_rate < 0 or slippage_bps < 0:
+        raise ValueError("fee_rate and slippage_bps must be non-negative")
+    entry_notional = usd_amount * leverage
+    exit_notional = entry_notional * (exit_price / entry_price)
+    turnover = entry_notional + exit_notional
+    return {
+        "fees_usd": turnover * fee_rate,
+        "slippage_usd": turnover * slippage_bps / 10_000,
+        "fee_rate": fee_rate,
+        "slippage_bps": slippage_bps,
+    }
+
+
 def _close_trade(
     trade_id: str,
     exit_price: float,
     close_reason: str = "",
+    fee_rate: float | None = None,
+    slippage_bps: float | None = None,
+    funding_rate_sum: float = 0,
 ) -> dict:
     conn = _init_db()
     try:
@@ -292,22 +341,37 @@ def _close_trade(
         if not row:
             return {"status": "error", "error": f"No open trade {trade_id}"}
         t = dict(row)
+        if t["portfolio_type"] == "spot" and funding_rate_sum:
+            return {"status": "error", "error": "Funding only applies to futures trades"}
         entry = t["entry_price"]
         leverage = t["leverage"]
         amount = t["usd_amount"]
         if t["side"] == "long":
-            pnl_pct = ((exit_price - entry) / entry) * 100 * leverage
+            gross_pct = ((exit_price - entry) / entry) * 100 * leverage
         else:
-            pnl_pct = ((entry - exit_price) / entry) * 100 * leverage
-        pnl_usd = amount * (pnl_pct / 100)
+            gross_pct = ((entry - exit_price) / entry) * 100 * leverage
+        gross_usd = amount * (gross_pct / 100)
+        costs = _trading_costs(
+            t["portfolio_type"], amount, leverage, entry, exit_price,
+            fee_rate, slippage_bps,
+        )
+        # Positive funding rates are paid by longs and received by shorts.
+        # Funding is charged on entry notional as an approximation.
+        direction = 1 if t["side"] == "long" else -1
+        funding_usd = amount * leverage * funding_rate_sum * direction
+        pnl_usd = gross_usd - costs["fees_usd"] - costs["slippage_usd"] - funding_usd
+        pnl_pct = (pnl_usd / amount) * 100 if amount else 0
         result = "win" if pnl_usd >= 0 else "loss"
         now = _now_iso()
         conn.execute(
             """UPDATE trades SET exit_price=?, closed_at=?, close_reason=?,
-               pnl_usd=?, pnl_percent=?, result=?, status='closed'
+               pnl_usd=?, pnl_percent=?, gross_pnl_usd=?, fees_usd=?,
+               slippage_usd=?, funding_usd=?, result=?, status='closed'
                WHERE id=?""",
             (exit_price, now, close_reason, round(pnl_usd, 2),
-             round(pnl_pct, 4), result, trade_id),
+             round(pnl_pct, 4), round(gross_usd, 2),
+             round(costs["fees_usd"], 2), round(costs["slippage_usd"], 2),
+             round(funding_usd, 2), result, trade_id),
         )
         bal_col = "spot_balance" if t["portfolio_type"] == "spot" else "futures_balance"
         win_inc = 1 if result == "win" else 0
@@ -326,10 +390,71 @@ def _close_trade(
             "status": "success", "trade_id": trade_id,
             "result": result, "pnl_usd": round(pnl_usd, 2),
             "pnl_percent": round(pnl_pct, 4),
+            "gross_pnl_usd": round(gross_usd, 2),
+            "fees_usd": round(costs["fees_usd"], 2),
+            "slippage_usd": round(costs["slippage_usd"], 2),
+            "funding_usd": round(funding_usd, 2),
+            "fee_rate": costs["fee_rate"],
+            "slippage_bps": costs["slippage_bps"],
         }
     except Exception as e:
         conn.rollback()
         return {"status": "error", "error": str(e)}
+    finally:
+        conn.close()
+
+
+def _estimate_historical_costs(
+    fee_rate: float | None = None,
+    slippage_bps: float | None = None,
+) -> dict:
+    """Read-only report: what closed trades recorded without costs would
+    have netted after fees and slippage. Funding is unknown for these
+    trades and is not estimated. Nothing is written."""
+    conn = _init_db()
+    try:
+        rows = conn.execute(
+            """SELECT * FROM trades WHERE status = 'closed' AND fees_usd IS NULL
+               AND exit_price IS NOT NULL ORDER BY closed_at ASC"""
+        ).fetchall()
+        trades: list[dict] = []
+        gross_total = 0.0
+        cost_total = 0.0
+        net_wins = 0
+        for row in rows:
+            t = dict(row)
+            costs = _trading_costs(
+                t["portfolio_type"], t["usd_amount"], t["leverage"],
+                t["entry_price"], t["exit_price"], fee_rate, slippage_bps,
+            )
+            gross = t["pnl_usd"] or 0
+            cost = costs["fees_usd"] + costs["slippage_usd"]
+            net = gross - cost
+            gross_total += gross
+            cost_total += cost
+            net_wins += 1 if net >= 0 else 0
+            trades.append({
+                "trade_id": t["id"], "symbol": t["symbol"],
+                "portfolio_type": t["portfolio_type"],
+                "recorded_pnl_usd": round(gross, 2),
+                "estimated_costs_usd": round(cost, 2),
+                "estimated_net_pnl_usd": round(net, 2),
+                "recorded_result": t["result"],
+                "estimated_result": "win" if net >= 0 else "loss",
+            })
+        count = len(trades)
+        recorded_wins = sum(1 for t in trades if t["recorded_result"] == "win")
+        return {
+            "status": "success",
+            "trades_without_costs": count,
+            "recorded_pnl_usd": round(gross_total, 2),
+            "estimated_costs_usd": round(cost_total, 2),
+            "estimated_net_pnl_usd": round(gross_total - cost_total, 2),
+            "recorded_win_rate": round(recorded_wins / count, 4) if count else 0,
+            "estimated_net_win_rate": round(net_wins / count, 4) if count else 0,
+            "funding_included": False,
+            "trades": trades,
+        }
     finally:
         conn.close()
 
@@ -838,7 +963,10 @@ def _get_trade_stats(symbol: str = "", strategy_type: str = "") -> dict:
                     ROUND(AVG(pnl_percent),2) as avg_pnl_pct,
                     ROUND(SUM(pnl_usd),2) as total_pnl,
                     ROUND(AVG(CASE WHEN result='win' THEN pnl_percent END),2) as avg_win_pct,
-                    ROUND(AVG(CASE WHEN result='loss' THEN pnl_percent END),2) as avg_loss_pct
+                    ROUND(AVG(CASE WHEN result='loss' THEN pnl_percent END),2) as avg_loss_pct,
+                    ROUND(SUM(fees_usd),2) as total_fees,
+                    ROUND(SUM(slippage_usd),2) as total_slippage,
+                    ROUND(SUM(funding_usd),2) as total_funding
                 FROM trades WHERE {where}""",
             params,
         ).fetchone()
@@ -1197,10 +1325,31 @@ def record_trade(trade_id: str, symbol: str, side: str, portfolio_type: str,
 
 
 @mcp.tool()
-def close_trade(trade_id: str, exit_price: float,
-                close_reason: str = "") -> dict:
-    """Close an open trade, calculate PnL, update portfolio balance."""
-    return _close_trade(trade_id, exit_price, close_reason)
+def close_trade(trade_id: str, exit_price: float, close_reason: str = "",
+                fee_rate: float | None = None,
+                slippage_bps: float | None = None,
+                funding_rate_sum: float = 0) -> dict:
+    """Close an open trade, calculate net PnL, update portfolio balance.
+
+    PnL is net of round-trip fees, slippage, and funding:
+    - fee_rate: per-side fee as a fraction of notional. Defaults to
+      0.0005 for futures and 0.001 for spot (Binance base taker).
+    - slippage_bps: per-side slippage in basis points. Defaults to 2.
+    - funding_rate_sum: futures only. Sum of the funding rates settled while
+      the trade was open, as the exchange reports them (for example
+      average_rate * total_fundings from get_funding_rate_history with
+      hours = time held). Positive rates cost longs and pay shorts."""
+    return _close_trade(trade_id, exit_price, close_reason, fee_rate,
+                        slippage_bps, funding_rate_sum)
+
+
+@mcp.tool()
+def estimate_historical_costs(fee_rate: float | None = None,
+                              slippage_bps: float | None = None) -> dict:
+    """Read-only. For closed trades recorded before costs were tracked,
+    estimate PnL after fees and slippage (funding not included). Shows how
+    much past paper results overstate real results. Writes nothing."""
+    return _estimate_historical_costs(fee_rate, slippage_bps)
 
 
 @mcp.tool()
