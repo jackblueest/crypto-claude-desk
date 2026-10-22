@@ -135,7 +135,7 @@ Phase 3 (~60 sec)
 
 Each agent writes a report file. The next phase reads those files. No message passing — just files on disk.
 
-### 95 MCP tools across 9 servers
+### 96 MCP tools across 9 servers
 
 | Server | Tools | What it provides |
 |--------|-------|-----------------|
@@ -145,7 +145,7 @@ Each agent writes a report file. The next phase reads those files. No message pa
 | crypto-futures | 10 | Funding rates, open interest, long/short ratios, liquidation levels |
 | crypto-advanced-indicators | 8 | OBV, MFI, ADX, Ichimoku, VWAP, Pivot Points, divergences |
 | crypto-market-microstructure | 6 | Orderbook depth, imbalance, spread, spoofing, market impact |
-| crypto-learning-db | 18 | Trade CRUD, predictions, track records, patterns, summaries, trade modifications (SQLite) |
+| crypto-learning-db | 19 | Trade CRUD, cost-aware PnL (fees, slippage, funding), predictions, track records, patterns, summaries, trade modifications (SQLite) |
 | crypto-polymarket | 6 | Prediction market probabilities — wisdom of crowds priced in real capital (Polymarket Gamma) |
 | crypto-defillama | 7 | TVL by chain/protocol, stablecoin supply, DEX volume — on-chain capital flows (DefiLlama) |
 
@@ -153,7 +153,7 @@ All powered by public APIs. **No API keys required.**
 
 ### Paper trading
 
-The portfolio manager executes trades in a local SQLite database (`data/db/learning.db`) via the crypto-learning-db MCP. No real money. You start with $10,000 spot + $10,000 futures. Every trade has mandatory stop-loss, minimum 2:1 risk/reward, and position limits.
+The portfolio manager executes trades in a local SQLite database (`data/db/learning.db`) via the crypto-learning-db MCP. No real money. You start with $10,000 spot + $10,000 futures. Closed-trade PnL is recorded net of round-trip fees (Binance base taker: 0.05%/side futures, 0.10%/side spot), 2 bps/side slippage, and futures funding, so paper results are not flattered by free execution. Every trade has mandatory stop-loss, minimum 2:1 risk/reward, and position limits.
 
 ### Cognitive learning
 
@@ -312,7 +312,7 @@ crypto-trading-desk/
 ├── bin/                         # autopilot.sh wrapper for cron/headless execution
 ├── skills/                      # 8 slash commands (setup, quick, analyze, portfolio, close-trade, validate-predictions, monitor, create)
 ├── hooks/                       # SessionStart: creates data directories
-├── mcp-servers/                 # 9 Python MCP servers (95 tools total)
+├── mcp-servers/                 # 9 Python MCP servers (96 tools total)
 ├── mcp-servers.plugin.json      # MCP config for plugin distribution
 ├── .claude/workflows/           # Dynamic workflows (e.g. close-learning)
 ├── dashboard/                   # Next.js ops dashboard (reads the DB read-only, localhost only)

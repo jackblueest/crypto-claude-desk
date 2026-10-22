@@ -40,7 +40,8 @@ All state lives in SQLite (`data/db/learning.db`) accessed via `crypto-learning-
 - `query_trades(symbol="BTC", status="open")` → filtered trade list
 - `get_trade_stats(symbol="BTC")` → aggregated win/loss stats
 - `record_trade(...)` → open a new trade (auto-deducts balance)
-- `close_trade(trade_id, exit_price, close_reason)` → close trade (auto-calculates PnL)
+- `close_trade(trade_id, exit_price, close_reason, funding_rate_sum)` → close trade (PnL net of fees, slippage, and funding)
+- `estimate_historical_costs()` → read-only: how much older trades recorded without costs overstate results
 
 Trade fields include: id, symbol, side, portfolio_type, entry_price, usd_amount, leverage, stop_loss, take_profit, strategy_type, reasoning, key_assumptions (JSON), agent_signals (JSON), learning (JSON)
 
@@ -139,11 +140,12 @@ There are no formulas. You are the consensus engine — synthesize the setup's t
 ### Step 7: Close Trade (when asked)
 
 When closing a trade (manually or because SL/TP hit):
-1. Call `close_trade(trade_id="trade_XXX", exit_price=..., close_reason="...")` from crypto-learning-db
-   - PnL is calculated automatically
+1. For FUTURES trades, call `get_funding_rate_history(symbol=..., hours=<hours held, max 720>)` from crypto-futures and compute `funding_rate_sum = average_rate * total_fundings`
+2. Call `close_trade(trade_id="trade_XXX", exit_price=..., close_reason="...", funding_rate_sum=...)` from crypto-learning-db
+   - PnL is calculated net of round-trip fees (default 0.05%/side futures, 0.10%/side spot), slippage (default 2 bps/side), and funding
    - Portfolio balance is updated automatically
    - Stats are updated automatically
-2. The coordinator will then delegate to learning-agent for post-mortem analysis
+3. The coordinator will then delegate to learning-agent for post-mortem analysis
 
 ### Step 8: Update Memory
 After every decision, update your persistent memory with:

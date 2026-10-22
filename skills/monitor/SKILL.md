@@ -31,7 +31,7 @@ For each open trade, check:
 If SL or TP was hit, delegate using Task with `subagent_type: general-purpose`, `model: opus`:
 
 "You are the portfolio-manager agent. Close trade {trade_id}. Current price is ${price}. The {SL/TP} at ${level} was hit.
-Call close_trade(trade_id='{trade_id}', exit_price={price}, close_reason='{SL/TP} hit at ${level}') from crypto-learning-db.
+For futures trades, first call get_funding_rate_history(symbol=..., hours=<hours the trade was open, max 720>) from crypto-futures MCP and pass funding_rate_sum = average_rate * total_fundings. Call close_trade(trade_id='{trade_id}', exit_price={price}, close_reason='{SL/TP} hit at ${level}', funding_rate_sum=...) from crypto-learning-db. PnL is recorded net of fees, slippage, and funding.
 Do NOT use the Edit tool."
 
 ### Step 2b: Trailing Stop Adjustment
